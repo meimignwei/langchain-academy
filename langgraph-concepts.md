@@ -532,3 +532,187 @@ invoke({"topic": "benefits of LangGraph", "max_analysts": 3})
 - **checkpoint** = 每次 state 变化后的 `StateSnapshot` 快照，含 `values` + `next` + `config`
 - **update_state** = 不跑节点，直接改 state 并创建新 checkpoint，`as_node` 决定下一步路由
 - **Send** = 并行调度，为每个任务创建独立实例，结果通过 reducer 汇聚
+- **Subgraph State** = 子图有独立的 State schema，同名字段自动传递，独有字段隔离看不到
+
+---
+
+## 9. Subgraph State — 主子图间的状态传递
+
+### 核心机制
+
+子图是一个完整的 `StateGraph`，有自己的 State schema。当父图把子图作为一个节点使用时：
+
+```
+父图 (ParentGraphState)
+  │  fields: parent_messages, parent_config, ...
+  │
+  └── compile时将子图作为节点嵌入
+        │
+        ▼
+      子图 (SubGraphState)
+        fields: messages, sub_specific_field, ...
+```
+
+### 三条关键规则
+
+| 规则 | 说明 |
+|------|------|
+| **同名字段自动传递** | 父图和子图都有 `messages` → 父图调用子图时自动把父图的 `messages` 传入，子图返回时自动把 `messages` 写回父图 |
+| **子图独有字段会丢弃** | 子图有父图没有的字段（如 `sub_internal_state`）→ 子图结束时丢弃，不写回父图 |
+| **父图独有字段不可见** | 父图有子图没有的字段（如 `parent_config`）→ 子图内部完全看不到也访问不到 |
+
+### 数据流示意图
+
+```
+父图 State: {messages, parent_config, session_id}
+                    │
+    ┌───────────────▼─────────────────────────┐
+    │ 调用子图（以节点形式嵌入）                  │
+    │                                           │
+    │  ① 输入过滤:                               │
+    │    父图 → 子图: 只传"同名字段"               │
+    │    {messages} ← parent_config/session_id   │
+    │    被过滤掉了（子图 schema 里没有）           │
+    │                                           │
+    │         ┌─────────────────┐               │
+    │         │ 子图内部执行      │               │
+    │         │                  │               │
+    │         │ State = {        │               │
+    │         │   messages,      │ ← 从父图传入  │
+    │         │   sub_internal,  │ ← 子图独有    │
+    │         │ }                │               │
+    │         └─────────────────┘               │
+    │                                           │
+    │  ② 输出过滤:                               │
+    │    子图 → 父图: 只写回"同名字段"              │
+    │    {messages} ← sub_internal 被丢弃了       │
+    │    （父图 schema 里没有这个字段）             │
+    └───────────────────────────────────────────┘
+                    │
+                    ▼
+父图 State: {messages(已更新), parent_config, session_id}
+```
+
+### 代码示例
+
+```python
+# 子图的 State（独立定义）
+class SubState(TypedDict):
+    messages: Annotated[list, add_messages]  # 和父图同名 → 自动传递
+    sub_internal: str                         # 子图独有 → 对外不可见
+
+# 父图的 State（独立定义）
+class ParentState(TypedDict):
+    messages: Annotated[list, add_messages]  # 和子图同名 → 自动传递
+    parent_config: dict                       # 父图独有 → 子图看不见
+
+# 构建子图
+sub_builder = StateGraph(SubState)
+sub_builder.add_node("sub_node", lambda s: {"messages": [AIMessage("子图处理")]})
+sub_builder.add_edge(START, "sub_node")
+sub_graph = sub_builder.compile()
+
+# 构建父图，子图作为节点嵌入
+parent_builder = StateGraph(ParentState)
+parent_builder.add_node("parent_node", some_function)
+parent_builder.add_node("child", sub_graph.compile())  # 子图作为节点
+parent_builder.add_edge(START, "parent_node")
+parent_builder.add_edge("parent_node", "child")
+parent_builder.add_edge("child", END)
+graph = parent_builder.compile()
+```
+
+### Shared State vs Isolated State — 多 Agent 架构设计
+
+这是两种不同的 State 设计哲学，决定了 agent 之间的信息可见性：
+
+#### 方案 A：共享 State（Shared State）
+
+所有 agent 共用一个大的 State schema，所有字段对所有 agent 可见。
+
+```
+         ┌──────────────────────────────────────┐
+         │     Global State                     │
+         │     messages, user_context,           │
+         │     research_notes, draft,            │
+         │     review_comments, final_output     │
+         └──────────────────────────────────────┘
+                    │
+      ┌─────────────┼─────────────┐
+      ▼             ▼             ▼
+   Agent A      Agent B      Agent C
+  (研究员)      (写手)        (审校)
+ 看到全部      看到全部      看到全部
+ 可写全部      可写全部      可写全部
+```
+
+| 优点 | 缺点 |
+|------|------|
+| 信息完全透明，agent 之间无需显式传递 | 任何 agent 都可能意外修改其他 agent 的数据 |
+| 实现简单，一个 schema 搞定 | 字段名冲突风险高 |
+| 适合紧密协作的小团队 agent（2-3 个） | 难以独立测试单个 agent |
+| | 随着 agent 增多，schema 膨胀严重 |
+
+#### 方案 B：隔离 State（Isolated State / Subgraph）
+
+每个 agent 有自己的 State schema，只能看到和修改自己的字段。
+
+```
+  父图 State (路由层)
+  {user_request, routing_decision}
+           │
+  ┌────────┼────────┐
+  ▼        ▼        ▼
+Agent A   Agent B   Agent C
+State A   State B   State C
+{messages, {messages, {messages,
+ notes}    draft}     review}
+  │        │        │
+  └────────┼────────┘
+           ▼
+  父图 State 拿到各子图的结果
+```
+
+| 优点 | 缺点 |
+|------|------|
+| 边界清晰，agent 不会互相干扰 | 需要显式的信息传递机制 |
+| 每个 agent 可独立开发、测试、复用 | 跨 agent 共享信息需要通过父图中转 |
+| schema 小而聚焦 | 实现复杂度更高 |
+| 适合大型多 agent 系统 | |
+
+#### 选择指南
+
+```
+小型团队 (2-3 agents) → Shared State 就够了，简单高效
+大型系统 (5+ agents)  → Isolated State，避免混乱
+安全敏感场景          → Isolated State，减少意外修改
+需要复用 agent        → Isolated State，每个 agent 自包含
+快速原型              → Shared State，快速迭代
+```
+
+### 实际应用：task_maistro 的多层架构
+
+```
+create_task_master (父图)
+  │  State: {task, assignments, work_history, ...}
+  │
+  ├── task_assignments 节点
+  │     │ 每创建一个 assignment → 都会创建一个子任务
+  │     │
+  │     ├── assignment_1 → call_sub_task（子图实例 1）
+  │     │     │  SubState: {messages, task_description}
+  │     │     │  agent 内部工作，只看到自己的 task_description
+  │     │     │  返回: {messages} ← 同名字段写回父图
+  │     │     │
+  │     ├── assignment_2 → call_sub_task（子图实例 2）
+  │     │     │  SubState: {messages, task_description}
+  │     │     │  完全隔离，看不到 assignment_1 的上下文
+  │     │     │  返回: {messages}
+  │     │     ...
+  │     │
+  │     └── 所有子任务完成后，父图拿到汇总的 messages
+  │
+  └── 汇总报告
+```
+
+每个子任务 agent 有自己的独立上下文（`task_description`），不会看到其他 agent 的内部状态，但都能通过同名的 `messages` 字段把结果写回父图。
