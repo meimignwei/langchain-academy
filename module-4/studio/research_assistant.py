@@ -14,7 +14,7 @@ from langgraph.graph import END, MessagesState, START, StateGraph
 
 ### LLM
 
-llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key="os.getenv("OPENAI_API_KEY", "")")
+llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key=os.getenv("OPENAI_API_KEY", ""))
 
 ### Schema 
 

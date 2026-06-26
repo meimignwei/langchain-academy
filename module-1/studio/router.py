@@ -15,7 +15,7 @@ def multiply(a: int, b: int) -> int:
     return a * b
 
 # LLM with bound tool
-llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key="os.getenv("OPENAI_API_KEY", "")")
+llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key=os.getenv("OPENAI_API_KEY", ""))
 llm_with_tools = llm.bind_tools([multiply])
 
 # System message

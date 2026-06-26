@@ -21,7 +21,7 @@ Jokes:
 {jokes}"""
 
 # LLM
-model = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key="os.getenv("OPENAI_API_KEY", "")")
+model = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key=os.getenv("OPENAI_API_KEY", ""))
 
 # Define the state
 class Subjects(BaseModel):

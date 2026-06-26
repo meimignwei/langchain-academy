@@ -34,7 +34,7 @@ def divide(a: int, b: int) -> float:
 tools = [add, multiply, divide]
 
 # Define LLM with bound tools
-llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key="os.getenv("OPENAI_API_KEY", "")")
+llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key=os.getenv("OPENAI_API_KEY", ""))
 llm_with_tools = llm.bind_tools(tools)
 
 # System message
