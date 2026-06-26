@@ -1,3 +1,4 @@
+import json
 import operator
 from pydantic import BaseModel, Field
 from typing import Annotated, List
@@ -13,7 +14,7 @@ from langgraph.graph import END, MessagesState, START, StateGraph
 
 ### LLM
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0) 
+llm = ChatOpenAI(model="deepseek-v4-pro", temperature=0, base_url="https://api.deepseek.com", api_key="os.getenv("OPENAI_API_KEY", "")")
 
 ### Schema 
 
@@ -72,36 +73,49 @@ analyst_instructions="""You are tasked with creating a set of AI analyst persona
 
 1. First, review the research topic:
 {topic}
-        
-2. Examine any editorial feedback that has been optionally provided to guide creation of the analysts: 
-        
+
+2. Examine any editorial feedback that has been optionally provided to guide creation of the analysts:
+
 {human_analyst_feedback}
-    
+
 3. Determine the most interesting themes based upon documents and / or feedback above.
-                    
+
 4. Pick the top {max_analysts} themes.
 
-5. Assign one analyst to each theme."""
+5. Assign one analyst to each theme.
+
+Return your response as a JSON object with this exact format:
+{{
+    "analysts": [
+        {{
+            "affiliation": "...",
+            "name": "...",
+            "role": "...",
+            "description": "..."
+        }}
+    ]
+}}"""
 
 def create_analysts(state: GenerateAnalystsState):
-    
+
     """ Create analysts """
-    
+
     topic=state['topic']
     max_analysts=state['max_analysts']
     human_analyst_feedback=state.get('human_analyst_feedback', '')
-        
-    # Enforce structured output
-    structured_llm = llm.with_structured_output(Perspectives)
 
     # System message
     system_message = analyst_instructions.format(topic=topic,
-                                                            human_analyst_feedback=human_analyst_feedback, 
+                                                            human_analyst_feedback=human_analyst_feedback,
                                                             max_analysts=max_analysts)
 
-    # Generate question 
-    analysts = structured_llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts.")])
-    
+    # Generate analysts via JSON mode (compatible with DeepSeek)
+    response = llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Generate the set of analysts. Respond with only the JSON object, no other text.")])
+
+    # Parse JSON
+    result = json.loads(response.content.strip().removeprefix("```json").removesuffix("```").strip())
+    analysts = Perspectives(**result)
+
     # Write the list of analysis to state
     return {"analysts": analysts.analysts}
 
@@ -143,30 +157,32 @@ def generate_question(state: InterviewState):
     # Write messages to state
     return {"messages": [question]}
 
-# Search query writing
-search_instructions = SystemMessage(content=f"""You will be given a conversation between an analyst and an expert. 
+# Search query helper
+def generate_search_query(messages: list) -> str:
+    """Use LLM to generate a search query from the conversation."""
+    query_prompt = """You will be given a conversation between an analyst and an expert.
+Your goal is to generate a well-structured query for use in web-search related to the conversation.
 
-Your goal is to generate a well-structured query for use in retrieval and / or web-search related to the conversation.
-        
 First, analyze the full conversation.
-
 Pay particular attention to the final question posed by the analyst.
+Convert this final question into a well-structured web search query.
 
-Convert this final question into a well-structured web search query""")
+Return ONLY the search query string, nothing else."""
+
+    response = llm.invoke([HumanMessage(content=query_prompt)] + messages)
+    return response.content.strip()
 
 def search_web(state: InterviewState):
-    
+
     """ Retrieve docs from web search """
 
-    # Search
     tavily_search = TavilySearch(max_results=3)
 
     # Search query
-    structured_llm = llm.with_structured_output(SearchQuery)
-    search_query = structured_llm.invoke([search_instructions]+state['messages'])
-    
+    search_query = generate_search_query(state['messages'])
+
     # Search
-    data = tavily_search.invoke({"query": search_query.search_query})
+    data = tavily_search.invoke({"query": search_query})
     search_docs = data.get("results", data)
 
      # Format
@@ -177,19 +193,21 @@ def search_web(state: InterviewState):
         ]
     )
 
-    return {"context": [formatted_search_docs]} 
+    return {"context": [formatted_search_docs]}
 
 def search_wikipedia(state: InterviewState):
-    
+
     """ Retrieve docs from wikipedia """
 
     # Search query
-    structured_llm = llm.with_structured_output(SearchQuery)
-    search_query = structured_llm.invoke([search_instructions]+state['messages'])
-    
+    search_query = generate_search_query(state['messages'])
+
     # Search
-    search_docs = WikipediaLoader(query=search_query.search_query, 
-                                  load_max_docs=2).load()
+    try:
+        search_docs = WikipediaLoader(query=search_query,
+                                      load_max_docs=2).load()
+    except Exception:
+        return {"context": []}
 
      # Format
     formatted_search_docs = "\n\n---\n\n".join(
@@ -199,7 +217,7 @@ def search_wikipedia(state: InterviewState):
         ]
     )
 
-    return {"context": [formatted_search_docs]} 
+    return {"context": [formatted_search_docs]}
 
 # Generate expert answer
 answer_instructions = """You are an expert being interviewed by an analyst.
@@ -380,8 +398,8 @@ def initiate_all_interviews(state: ResearchGraphState):
     """ Conditional edge to initiate all interviews via Send() API or return to create_analysts """    
 
     # Check if human feedback
-    human_analyst_feedback=state.get('human_analyst_feedback','approve')
-    if human_analyst_feedback.lower() != 'approve':
+    human_analyst_feedback=state.get('human_analyst_feedback','').strip().lower()
+    if human_analyst_feedback not in ('', 'approve'):
         # Return to create_analysts
         return "create_analysts"
 

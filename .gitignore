@@ -219,3 +219,6 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 module-6/deployment/docker-compose.yml
+
+# LangGraph dev server checkpoint data
+.langgraph_api/

@@ -1,4 +1,5 @@
-import uuid 
+import os
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +14,7 @@ from langgraph.store.base import BaseStore
 import configuration
 
 # Initialize the LLM
-model = ChatOpenAI(model="gpt-4o", temperature=0) 
+model = ChatOpenAI(model="deepseek-chat", temperature=0, base_url="https://api.deepseek.com", api_key=os.getenv("OPENAI_API_KEY")) 
 
 # Memory schema
 class Memory(BaseModel):
